@@ -10,14 +10,14 @@ This guide covers credential security, multi-router profile management, LuCI ses
 
 ```mermaid
 flowchart TD
-    A["Credential Resolution Request"] --> B{"Tier 1: Environment Variables<br/>ROUTER_PASSWORD or TPLUCI_PASSWORD?"}
-    B -- Yes --> C["Use Env Vars<br/>(source = 'env')"]
-    B -- No --> D{"Tier 2: .env File<br/>./.env or ~/.config/tpluci/.env?"}
-    D -- Yes --> E["Load from .env File<br/>(source = 'dotenv')"]
-    D -- No --> F{"Tier 3: OS Keyring<br/>keyring.get_password('tpluci', profile)?"}
-    F -- Yes --> G["Load Secret from OS Keyring<br/>(source = 'keyring')"]
-    F -- No --> H{"Tier 4: Hardened Config File<br/>~/.config/tpluci/config.json (0600)?"}
-    H -- Yes --> I["Load Password + Emit Warning to stderr<br/>(source = 'config_file')"]
+    A["Credential Resolution Request"] --> B{"Tier 1: Env Vars (ROUTER_PASSWORD)?"}
+    B -- Yes --> C["Use Env Vars (source = env)"]
+    B -- No --> D{"Tier 2: .env File (./.env or ~/.config/tpluci/.env)?"}
+    D -- Yes --> E["Load from .env File (source = dotenv)"]
+    D -- No --> F{"Tier 3: OS Keyring (macOS Keychain / SecretService)?"}
+    F -- Yes --> G["Load Secret from OS Keyring (source = keyring)"]
+    F -- No --> H{"Tier 4: Hardened Config (~/.config/tpluci/config.json 0600)?"}
+    H -- Yes --> I["Load Password + Warn on stderr (source = config_file)"]
     H -- No --> J["Raise AuthError (AUTH_MISSING, Exit Code 2)"]
 ```
 

@@ -11,20 +11,20 @@ This guide documents the internal architecture of `tpluci`, TP-Link's encrypted 
 ```mermaid
 flowchart TD
     subgraph Entrypoints["Entrypoints"]
-        CLI["cli.py<br/>(Click OrderIndependentGroup)"]
-        MCP["mcp_server.py<br/>(FastMCP Server)"]
-        LIB["External Python Code<br/>(import tpluci)"]
+        CLI["cli.py (Click OrderIndependentGroup)"]
+        MCP["mcp_server.py (FastMCP Server)"]
+        LIB["External Python Code (import tpluci)"]
     end
 
     subgraph Core["Core Library (src/tpluci/)"]
-        CLIENT["client.py<br/>(RouterClient)"]
-        CONFIG["config.py<br/>(4-Tier Credentials)"]
-        SESSION["session.py<br/>(0600 /tmp SessionCache)"]
-        CRYPTO["crypto.py<br/>(53-Byte RSA + AES-128-CBC)"]
-        MODELS["models.py<br/>(Response Normalizers)"]
-        ENDPOINTS["endpoints.py<br/>(30 Verified Endpoints & Radio Map)"]
-        FMT["formatters.py<br/>(Tables, KV, JSON & Error Emitters)"]
-        EXC["exceptions.py<br/>(TpluciError & Exit Codes 0-5)"]
+        CLIENT["client.py (RouterClient)"]
+        CONFIG["config.py (4-Tier Credentials)"]
+        SESSION["session.py (0600 /tmp SessionCache)"]
+        CRYPTO["crypto.py (53-Byte RSA + AES-128-CBC)"]
+        MODELS["models.py (Response Normalizers)"]
+        ENDPOINTS["endpoints.py (30 Verified Endpoints)"]
+        FMT["formatters.py (Tables, KV, JSON & Errors)"]
+        EXC["exceptions.py (TpluciError & Exit Codes 0-5)"]
     end
 
     CLI --> FMT
@@ -51,7 +51,7 @@ flowchart TD
 | [`cli.py`](../src/tpluci/cli.py) | Pure `click` CLI entrypoint (`tpluci`). Implements `OrderIndependentGroup` so global flags (`--json`, `--plain`, `--profile`, `--url`, `--timeout`, `--no-cache`) are parsed at any position without stripping subcommand options. |
 | [`client.py`](../src/tpluci/client.py) | `RouterClient`: manages `httpx.Client`, 50ms rate limiting, 3-step RSA+AES login handshake, transparent session auto-recovery, `call()`, and safe `read_modify_write()`. |
 | [`crypto.py`](../src/tpluci/crypto.py) | Pure-Python cryptographic primitives matching TP-Link's `tpEncrypt.js` and `encrypt.js`: `md5_hash()`, `generate_aes_key_iv()`, `aes_encrypt()`, `aes_decrypt()`, `rsa_encrypt_chunk()`, `rsa_encrypt()`, and `build_signature()`. |
-| [`config.py`](../src/tpluci/config.py) | 4-tier credential resolver (`env` $\to$ `.env` $\to$ `keyring` $\to$ `0600 ~/.config/tpluci/config.json`) and profile CRUD helpers. |
+| [`config.py`](../src/tpluci/config.py) | 4-tier credential resolver (`env` -> `.env` -> `keyring` -> `0600 ~/.config/tpluci/config.json`) and profile CRUD helpers. |
 | [`session.py`](../src/tpluci/session.py) | `SessionData` and `SessionCache`: atomic `0600` (`O_NOFOLLOW`) read/write of session tokens and encryption keys in `$TMPDIR/tpluci-session-<uid>-<profile>.json` with a 180-second TTL. |
 | [`models.py`](../src/tpluci/models.py) | Data normalizers (`parse_status_summary`, `parse_clients`, `parse_wifi_summary`, `parse_wan_info`, `parse_lan_info`), including `[0.0, 1.0]` float-to-percentage conversion and natural IPv4 sorting. |
 | [`endpoints.py`](../src/tpluci/endpoints.py) | `WIFI_RADIO_MAP` (mapping `2g`, `5g`, `guest-2g`, `guest-5g`, `iot-2g`, `iot-5g` to LuCI forms) and `VERIFIED_ENDPOINTS` (catalog of 30 verified Archer AX23 endpoints). |
@@ -80,26 +80,29 @@ TP-Link's customized OpenWrt/LuCI firmware replaces standard `ubus` JSON-RPC wit
 sequenceDiagram
     autonumber
     participant Client as tpluci (RouterClient)
-    participant Router as TP-Link LuCI (/cgi-bin/luci)
+    participant Router as TP-Link LuCI CGI
 
-    Note over Client,Router: Phase 1: Login Handshake (Skipped when /tmp cache is valid)
-    Client->>Router: POST /cgi-bin/luci/;stok=/login?form=keys (operation=read)
-    Router-->>Client: {"data": {"password": ["<nn_keys_hex>", "<ee_keys_hex>"]}} (512-bit RSA)
+    Note over Client,Router: Phase 1 - Login Handshake (Skipped when /tmp cache is valid)
+    Client->>Router: POST /login?form=keys (operation=read)
+    Router-->>Client: RSA Password Public Key (nn_keys, ee_keys - 512-bit)
 
-    Client->>Router: POST /cgi-bin/luci/;stok=/login?form=auth (operation=read)
-    Router-->>Client: {"data": {"key": ["<nn_auth_hex>", "<ee_auth_hex>"], "seq": 599694923}}
+    Client->>Router: POST /login?form=auth (operation=read)
+    Router-->>Client: RSA Signing Public Key (nn_auth, ee_auth) + seq
 
-    Note over Client: 1. Encrypt password with (nn_keys, ee_keys)<br/>2. Generate 16-digit ASCII AES key & IV<br/>3. h = MD5("admin" + password)<br/>4. data = AES_CBC("operation=login&password=" + urlencode(enc_pwd))<br/>5. s = seq + len(data)<br/>6. sign = RSA_auth("k=<key>&i=<iv>&h=<h>&s=<s>")
+    Note over Client: Encrypt password with RSA (nn_keys, ee_keys)
+    Note over Client: Generate 16-digit ASCII AES-128-CBC key and IV
+    Note over Client: Compute h = MD5(username + password) and s = seq + len(data)
+    Note over Client: Encrypt sign = RSA_auth(k, i, h, s) and data = AES_CBC(login payload)
 
-    Client->>Router: POST /cgi-bin/luci/;stok=/login?form=login (sign=..., data=...)
-    Router-->>Client: Set-Cookie: sysauth=... + {"data": "<AES_B64_CIPHERTEXT>"}
-    Note over Client: Decrypt data -> {"success": true, "data": {"stok": "a1b2c3..."}}<br/>Save {stok, key, iv, seq, nn_auth, ee_auth, cookies} to 0600 /tmp cache
+    Client->>Router: POST /login?form=login (sign, data)
+    Router-->>Client: Set-Cookie sysauth + AES-encrypted stok session token
+    Note over Client: Decrypt stok and save session to 0600 /tmp cache (180s TTL)
 
-    Note over Client,Router: Phase 2: Authenticated API Call (~30ms)
-    Note over Client: 1. data = AES_CBC("operation=read")<br/>2. s = seq + len(data)<br/>3. sign = RSA_auth("h=<h>&s=<s>")
-    Client->>Router: POST /cgi-bin/luci/;stok=<stok>/admin/status?form=all (sign=..., data=...)
-    Router-->>Client: {"data": "<AES_B64_CIPHERTEXT>"}
-    Note over Client: Decrypt AES_B64_CIPHERTEXT -> {"success": true, "data": { ...199 keys... }}
+    Note over Client,Router: Phase 2 - Authenticated API Call (~30ms)
+    Note over Client: Encrypt data = AES_CBC(operation=read) and sign = RSA_auth(h, seq + len(data))
+    Client->>Router: POST /admin/status?form=all (sign, data)
+    Router-->>Client: AES-encrypted JSON payload
+    Note over Client: Decrypt AES-128-CBC response into Python dict (199 keys)
 ```
 
 ### Critical Cryptographic Implementation Details (`crypto.py`)
@@ -111,7 +114,7 @@ sequenceDiagram
    - Modern OpenSSL 3.x (and `cryptography`'s C backend) rejects 512-bit RSA keys with `ValueError: key_size must be at least 1024-bits`.
    - `rsa_encrypt_chunk()` constructs the RFC 2313 PKCS#1 v1.5 encryption block `0x00 || 0x02 || PS (non-zero random bytes) || 0x00 || chunk_bytes` and computes `pow(int.from_bytes(em, "big"), ee, nn)` in pure Python, supporting both 512-bit and 1024/2048-bit keys with zero C-extension restrictions.
 3. **53-Byte UTF-8 Chunking**:
-   - A 512-bit (64-byte) RSA key with 11 bytes of PKCS#1 v1.5 overhead (`0x00 0x02` + at least 8 bytes of `PS` + `0x00`) can encrypt at most $64 - 11 = 53\text{ bytes}$ per block.
+   - A 512-bit (64-byte) RSA key with 11 bytes of PKCS#1 v1.5 overhead (`0x00 0x02` + at least 8 bytes of `PS` + `0x00`) can encrypt at most `64 - 11 = 53 bytes` per block.
    - `rsa_encrypt()` encodes the plaintext to UTF-8 bytes first and slices into 53-byte chunks (`data_bytes[i : i + 53]`), formatting each encrypted chunk as zero-padded lowercase hex matching `len(nn_hex)` and concatenating them.
 4. **Ephemeral 16-Digit ASCII AES-128-CBC Key & IV**:
    - `generate_aes_key_iv()` generates two 16-character random numeric strings (e.g., `"4819203817263541"`), which serve as 16-byte UTF-8 keys for AES-128-CBC with PKCS7 (128-bit block) padding and Base64 output.

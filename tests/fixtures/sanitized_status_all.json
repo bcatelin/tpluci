@@ -1,0 +1,73 @@
+{
+  "model": "Archer AX23",
+  "cpu1_usage": 18,
+  "mem_usage": 42,
+  "wan_ipv4_uptime": 86400,
+  "wan_internet_status": "connected",
+  "internet_status": "connected",
+  "wan_ipv4_ipaddr": "203.0.113.42",
+  "wan_ipv4_gateway": "203.0.113.1",
+  "wan_ipv4_conntype": "pppoe",
+  "wan_ipv4_dns": "1.1.1.1, 8.8.8.8",
+  "lan_ipv4_ipaddr": "192.168.7.250",
+  "lan_ipv4_netmask": "255.255.255.0",
+  "lan_ipv4_macaddr": "AA-BB-CC-11-22-33",
+  "wireless_2g_enable": "on",
+  "wireless_2g_ssid": "TestNet_2G",
+  "wireless_2g_channel": 6,
+  "wireless_2g_encryption": "psk",
+  "wireless_2g_hidden": "off",
+  "wireless_5g_enable": "on",
+  "wireless_5g_ssid": "TestNet_5G",
+  "wireless_5g_channel": 36,
+  "wireless_5g_encryption": "psk",
+  "wireless_5g_hidden": "off",
+  "guest_2g_enable": "off",
+  "guest_2g_ssid": "TestGuest_2G",
+  "guest_2g_channel": 6,
+  "guest_2g_encryption": "psk",
+  "guest_2g_hidden": "off",
+  "guest_5g_enable": "off",
+  "guest_5g_ssid": "TestGuest_5G",
+  "guest_5g_channel": 36,
+  "guest_5g_encryption": "psk",
+  "guest_5g_hidden": "off",
+  "iot_2g_enable": "on",
+  "iot_2g_ssid": "TestIoT_2G",
+  "iot_2g_channel": 6,
+  "iot_2g_encryption": "psk",
+  "iot_2g_hidden": "off",
+  "iot_5g_enable": "off",
+  "iot_5g_ssid": "TestIoT_5G",
+  "iot_5g_channel": 36,
+  "iot_5g_encryption": "psk",
+  "iot_5g_hidden": "off",
+  "access_devices_wireless_host": [
+    {
+      "hostname": "Test-Laptop",
+      "ipaddr": "192.168.7.101",
+      "macaddr": "AA-BB-CC-DD-EE-01",
+      "wire_type": "5G"
+    },
+    {
+      "hostname": "Test-Phone",
+      "ipaddr": "192.168.7.102",
+      "macaddr": "AA-BB-CC-DD-EE-02",
+      "wire_type": "2.4G"
+    },
+    {
+      "hostname": "Smart-Plug",
+      "ipaddr": "192.168.7.103",
+      "macaddr": "AA-BB-CC-DD-EE-03",
+      "wire_type": "2.4G"
+    }
+  ],
+  "access_devices_wired": [
+    {
+      "hostname": "NAS-Server",
+      "ipaddr": "192.168.7.10",
+      "macaddr": "AA-BB-CC-DD-EE-10",
+      "wire_type": "wired"
+    }
+  ]
+}

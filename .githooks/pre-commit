@@ -1,0 +1,87 @@
+#!/bin/sh
+# ==============================================================================
+# Pre-commit hook — secret scanning with Gitleaks
+# Scans staged changes only. Blocks the commit if a secret is found.
+#
+# Supports: macOS, Linux, Windows (Git Bash / MSYS2 / Cygwin)
+# Requires: gitleaks (native) OR Docker Desktop running
+# ==============================================================================
+
+set -e
+
+# ------------------------------------------------------------------------------
+# Platform detection and PATH setup
+# ------------------------------------------------------------------------------
+IS_WINDOWS=false
+case "$(uname -s)" in
+  MINGW*|CYGWIN*|MSYS*)
+    # On Windows (Git Bash), prevent MSYS from converting Unix-style paths
+    # before passing them to Docker. Docker Desktop for Windows handles them natively.
+    export MSYS_NO_PATHCONV=1
+    IS_WINDOWS=true
+    ;;
+  Darwin*)
+    # Ensure MacPorts and Homebrew binary locations are in PATH (for GUI apps like SourceTree
+    # that may not inherit the full shell PATH).
+    # Covers MacPorts (/opt/local/bin), Apple Silicon Homebrew (/opt/homebrew/bin), and Intel (/usr/local/bin).
+    export PATH="/opt/local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+    ;;
+esac
+
+# ------------------------------------------------------------------------------
+# Secret scanning
+# ------------------------------------------------------------------------------
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+BASELINE_FILE="$REPO_ROOT/.gitleaks-baseline.json"
+DOCKER_BASELINE=/scan/.gitleaks-baseline.json
+
+if command -v gitleaks >/dev/null 2>&1; then
+  echo "Scanning staged changes for secrets (native gitleaks)..."
+  if [ -f "$BASELINE_FILE" ]; then
+    gitleaks protect --source "$REPO_ROOT" --staged --verbose --baseline-path "$BASELINE_FILE"
+  else
+    gitleaks protect --source "$REPO_ROOT" --staged --verbose
+  fi
+elif command -v docker >/dev/null 2>&1; then
+  echo "Scanning staged changes for secrets (docker gitleaks)..."
+  if [ "$IS_WINDOWS" = "true" ]; then
+    # On Windows, convert to Windows-style path for the Docker volume mount
+    REPO_ROOT_DOCKER="$(cd "$REPO_ROOT" && pwd -W 2>/dev/null || echo "$REPO_ROOT")"
+  else
+    REPO_ROOT_DOCKER="$REPO_ROOT"
+  fi
+  if [ -f "$BASELINE_FILE" ]; then
+    docker run --rm \
+      -v "$REPO_ROOT_DOCKER":/scan \
+      zricethezav/gitleaks:latest protect \
+      --source /scan --staged --verbose \
+      --baseline-path "$DOCKER_BASELINE"
+  else
+    docker run --rm \
+      -v "$REPO_ROOT_DOCKER":/scan \
+      zricethezav/gitleaks:latest protect \
+      --source /scan --staged --verbose
+  fi
+else
+  echo ""
+  echo "ERROR: Neither gitleaks nor docker found."
+  echo "  Install gitleaks: https://github.com/gitleaks/gitleaks#installing"
+  echo "  (e.g., 'port install gitleaks' on MacPorts, 'brew install gitleaks' on Homebrew)"
+  echo "  Or ensure Docker Desktop is running."
+  echo ""
+  exit 1
+fi
+
+EXIT_CODE=$?
+
+if [ $EXIT_CODE -ne 0 ]; then
+  echo ""
+  echo "Secret detected. Commit blocked."
+  echo ""
+  echo "  - If this is a real secret: remove it, rotate the key, then re-commit."
+  echo "  - If this is a false positive: review rule exceptions before proceeding."
+  echo ""
+  exit 1
+fi
+
+echo "No secrets detected."

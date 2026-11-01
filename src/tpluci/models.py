@@ -231,3 +231,477 @@ def parse_lan_info(raw_lan: dict[str, Any], raw_dhcp: dict[str, Any] | None = No
             "gateway": raw_dhcp.get("gateway", ""),
         }
     return info
+
+
+WEEKDAY_MAP: dict[str, str] = {
+    "mon": "Mon",
+    "monday": "Mon",
+    "tue": "Tues",
+    "tues": "Tues",
+    "tuesday": "Tues",
+    "wed": "Wed",
+    "wednesday": "Wed",
+    "thu": "Thur",
+    "thur": "Thur",
+    "thurs": "Thur",
+    "thursday": "Thur",
+    "fri": "Fri",
+    "friday": "Fri",
+    "sat": "Sat",
+    "saturday": "Sat",
+    "sun": "Sun",
+    "sunday": "Sun",
+}
+
+
+def normalize_weekday(day: str) -> str:
+    """Normalize day string to Archer AX23 LuCI reboot weekday format (e.g. 'Tues', 'Thur')."""
+    cleaned = day.strip()
+    # Check numeric 1..28 for monthly cycle
+    if cleaned.isdigit():
+        val = int(cleaned)
+        if 1 <= val <= 28:
+            return str(val)
+        raise ValueError(f"Day of month must be between 1 and 28, got: '{day}'")
+
+    low = cleaned.lower()
+    if low in WEEKDAY_MAP:
+        return WEEKDAY_MAP[low]
+
+    # Already proper case
+    if cleaned in ("Mon", "Tues", "Wed", "Thur", "Fri", "Sat", "Sun"):
+        return cleaned
+
+    raise ValueError(
+        f"Invalid weekday '{day}'. Expected one of: Mon, Tues, Wed, Thur, Fri, Sat, Sun (or 1-28 for monthly)."
+    )
+
+
+def parse_mesh_satellites(
+    raw_sclient_list: list[dict[str, Any]] | dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Normalize mesh satellites list from easymesh_network?form=mesh_sclient_list_all."""
+    items: list[dict[str, Any]]
+    if isinstance(raw_sclient_list, list):
+        items = raw_sclient_list
+    elif isinstance(raw_sclient_list, dict):
+        items = (
+            raw_sclient_list.get("mesh_sclient_list")
+            or raw_sclient_list.get("sclient_list")
+            or raw_sclient_list.get("data")
+            or []
+        )
+    else:
+        items = []
+
+    satellites: list[dict[str, Any]] = []
+    for item in items:
+        conn = item.get("connect_type", "")
+        backhaul = "wired" if conn == "wire" else "wireless"
+
+        raw_sig = item.get("signal_strength", 0)
+        try:
+            sig_int = int(raw_sig)
+        except (TypeError, ValueError):
+            sig_int = 0
+
+        if conn == "wire" or sig_int == -254 or str(raw_sig) == "-254":
+            signal = "N/A"
+        else:
+            signal = f"{sig_int} dBm"
+
+        num_clients = item.get("client_num") or item.get("mesh_nclient_num") or 0
+        try:
+            clients_count = int(num_clients)
+        except (TypeError, ValueError):
+            clients_count = 0
+
+        satellites.append({
+            "name": item.get("name", ""),
+            "model": item.get("model", ""),
+            "ip": item.get("ip") or item.get("ipaddr", ""),
+            "mac": item.get("mac") or item.get("macaddr", ""),
+            "location": item.get("location", ""),
+            "connect_type": conn,
+            "backhaul": backhaul,
+            "signal_strength": signal,
+            "clients_count": clients_count,
+            "status": item.get("status", "online"),
+            "device_type": item.get("device_type", ""),
+        })
+
+    return satellites
+
+
+def parse_mesh_topology(raw_topo: dict[str, Any]) -> dict[str, Any]:
+    """Parse full mesh topology tree from easymesh_network?form=mesh_topology."""
+    root_clients: list[dict[str, Any]] = []
+    for c in raw_topo.get("mesh_nclient_list", []):
+        root_clients.append({
+            "name": c.get("hostname") or c.get("name", ""),
+            "ip": c.get("ip") or c.get("ipaddr", ""),
+            "mac": c.get("mac") or c.get("macaddr", ""),
+            "connection_type": c.get("wire_type") or c.get("connection_type", ""),
+            "device_type": c.get("device_type", ""),
+        })
+
+    root_node = {
+        "name": raw_topo.get("name", "Archer AX23"),
+        "model": raw_topo.get("model", "Archer AX23"),
+        "ip": raw_topo.get("ip", ""),
+        "mac": raw_topo.get("mac", ""),
+        "clients": root_clients,
+    }
+
+    satellites: list[dict[str, Any]] = []
+    for s in raw_topo.get("mesh_sclient_list", []):
+        sat_clients: list[dict[str, Any]] = []
+        for c in s.get("mesh_nclient_list", []):
+            raw_tx = c.get("txrate", 0)
+            raw_rx = c.get("rxrate", 0)
+            try:
+                tx_int = int(raw_tx)
+            except (TypeError, ValueError):
+                tx_int = 0
+            try:
+                rx_int = int(raw_rx)
+            except (TypeError, ValueError):
+                rx_int = 0
+
+            tx_mbps = round(tx_int / 1000) if tx_int > 2000 else tx_int
+            rx_mbps = round(rx_int / 1000) if rx_int > 2000 else rx_int
+
+            raw_sig = c.get("signal_strength")
+            sig_str = "N/A"
+            if raw_sig not in (None, "", -254, "-254"):
+                sig_str = f"{raw_sig} dBm" if not str(raw_sig).endswith("dBm") else str(raw_sig)
+
+            sat_clients.append({
+                "name": c.get("name") or c.get("hostname", ""),
+                "ip": c.get("ip") or c.get("ipaddr", ""),
+                "mac": c.get("mac") or c.get("macaddr", ""),
+                "connection_type": c.get("connection_type") or c.get("wire_type", ""),
+                "signal_strength": sig_str,
+                "txrate_mbps": tx_mbps,
+                "rxrate_mbps": rx_mbps,
+            })
+
+        raw_sat_sig = s.get("signal_strength", 0)
+        conn = s.get("connect_type", "")
+        if conn == "wire" or str(raw_sat_sig) == "-254" or raw_sat_sig == -254:
+            sat_sig = "N/A"
+        else:
+            sat_sig = f"{raw_sat_sig} dBm"
+
+        satellites.append({
+            "name": s.get("name", ""),
+            "model": s.get("model", ""),
+            "ip": s.get("ip") or s.get("ipaddr", ""),
+            "mac": s.get("mac") or s.get("macaddr", ""),
+            "location": s.get("location", ""),
+            "connect_type": conn,
+            "backhaul": "wired" if conn == "wire" else "wireless",
+            "signal_strength": sat_sig,
+            "clients": sat_clients,
+        })
+
+    return {
+        "root": root_node,
+        "satellites": satellites,
+    }
+
+
+def parse_mesh_satellite_detail(raw_detail: dict[str, Any]) -> dict[str, Any]:
+    """Normalize detailed single-node mesh metrics from easymesh_network?form=mesh_sclient_detail."""
+    conn = raw_detail.get("connect_type", "")
+    backhaul = "wired" if conn == "wire" else "wireless"
+
+    def _to_mbps(raw_val: Any) -> int:
+        if raw_val is None:
+            return 0
+        try:
+            return int(raw_val) // 1024
+        except (TypeError, ValueError):
+            return 0
+
+    def _to_signal(raw_val: Any) -> str:
+        if raw_val is None or conn == "wire" or str(raw_val) == "-254" or raw_val == -254:
+            return "N/A"
+        return f"{raw_val} dBm"
+
+    clients: list[dict[str, Any]] = []
+    for c in raw_detail.get("mesh_nclient_list", []):
+        raw_tx = c.get("txrate", 0)
+        raw_rx = c.get("rxrate", 0)
+        try:
+            tx_int = int(raw_tx)
+        except (TypeError, ValueError):
+            tx_int = 0
+        try:
+            rx_int = int(raw_rx)
+        except (TypeError, ValueError):
+            rx_int = 0
+
+        clients.append({
+            "name": c.get("name") or c.get("hostname", ""),
+            "ip": c.get("ip") or c.get("ipaddr", ""),
+            "mac": c.get("mac") or c.get("macaddr", ""),
+            "connection_type": c.get("connection_type") or c.get("wire_type", ""),
+            "signal_strength": _to_signal(c.get("signal_strength")),
+            "txrate_mbps": round(tx_int / 1000) if tx_int > 2000 else tx_int,
+            "rxrate_mbps": round(rx_int / 1000) if rx_int > 2000 else rx_int,
+        })
+
+    return {
+        "name": raw_detail.get("name", ""),
+        "location": raw_detail.get("location", ""),
+        "model": raw_detail.get("model", ""),
+        "mac": raw_detail.get("mac", ""),
+        "ip": raw_detail.get("ip", ""),
+        "firmware_version": raw_detail.get("firmware_version") or raw_detail.get("soft_ver", ""),
+        "parent_device_mac": raw_detail.get("parent_device_mac", ""),
+        "connect_type": conn,
+        "backhaul": backhaul,
+        "link_speed_24g_mbps": _to_mbps(raw_detail.get("link_speed_24g")),
+        "link_speed_5g_mbps": _to_mbps(raw_detail.get("link_speed_5g")),
+        "signal_strength_24g": _to_signal(raw_detail.get("signal_strength_24g")),
+        "signal_strength_5g": _to_signal(raw_detail.get("signal_strength_5g")),
+        "clients": clients,
+    }
+
+
+def resolve_mesh_node(nodes: list[dict[str, Any]], target: str) -> dict[str, Any] | None:
+    """Resolve a target string (name, IP, or MAC) to a mesh node dictionary."""
+    t_clean = target.strip().lower()
+    t_mac = t_clean.replace("-", ":")
+
+    for node in nodes:
+        node_mac = str(node.get("mac", "")).lower().replace("-", ":")
+        if node_mac == t_mac:
+            return node
+
+    for node in nodes:
+        node_ip = str(node.get("ip", "")).lower()
+        if node_ip == t_clean:
+            return node
+
+    for node in nodes:
+        node_name = str(node.get("name", "")).lower()
+        if node_name == t_clean:
+            return node
+
+    for node in nodes:
+        node_model = str(node.get("model", "")).lower()
+        if node_model == t_clean:
+            return node
+
+    for node in nodes:
+        node_name = str(node.get("name", "")).lower()
+        node_model = str(node.get("model", "")).lower()
+        if t_clean in node_name or t_clean in node_model:
+            return node
+
+    return None
+
+
+def parse_clients_detailed(
+    raw_topo: dict[str, Any] | None,
+    raw_accel: list[dict[str, Any]] | dict[str, Any],
+    raw_all: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Combine mesh topology parent node mapping with game_accelerator rich telemetry."""
+    mac_to_node: dict[str, str] = {}
+    root_name = "Archer AX23"
+
+    if raw_topo:
+        root_name = raw_topo.get("name", "Archer AX23") or "Archer AX23"
+        for c in raw_topo.get("mesh_nclient_list", []):
+            c_mac = str(c.get("mac") or c.get("macaddr", "")).lower().replace("-", ":")
+            if c_mac:
+                mac_to_node[c_mac] = root_name
+
+        for s in raw_topo.get("mesh_sclient_list", []):
+            sat_name = s.get("name") or s.get("model") or "Satellite"
+            for c in s.get("mesh_nclient_list", []):
+                c_mac = str(c.get("mac") or c.get("macaddr", "")).lower().replace("-", ":")
+                if c_mac:
+                    mac_to_node[c_mac] = sat_name
+
+    dev_list: list[dict[str, Any]]
+    if isinstance(raw_accel, list):
+        dev_list = raw_accel
+    elif isinstance(raw_accel, dict):
+        dev_list = (
+            raw_accel.get("device_list")
+            or raw_accel.get("deviceList")
+            or raw_accel.get("devices")
+            or []
+        )
+    else:
+        dev_list = []
+
+    clients: list[dict[str, Any]] = []
+    seen_macs: set[str] = set()
+
+    for dev in dev_list:
+        mac = str(dev.get("mac", ""))
+        mac_key = mac.lower().replace("-", ":")
+        seen_macs.add(mac_key)
+
+        node = mac_to_node.get(mac_key, root_name)
+
+        raw_tx = dev.get("txrate", 0)
+        raw_rx = dev.get("rxrate", 0)
+        try:
+            tx_int = int(raw_tx)
+        except (TypeError, ValueError):
+            tx_int = 0
+        try:
+            rx_int = int(raw_rx)
+        except (TypeError, ValueError):
+            rx_int = 0
+
+        tx_mbps = round(tx_int / 1000) if tx_int > 2000 else tx_int
+        rx_mbps = round(rx_int / 1000) if rx_int > 2000 else rx_int
+
+        raw_ds = dev.get("downloadSpeed", 0)
+        raw_us = dev.get("uploadSpeed", 0)
+        try:
+            ds_int = int(raw_ds)
+        except (TypeError, ValueError):
+            ds_int = 0
+        try:
+            us_int = int(raw_us)
+        except (TypeError, ValueError):
+            us_int = 0
+        down_kbps = ds_int * 8 // 1024
+        up_kbps = us_int * 8 // 1024
+
+        tag = str(dev.get("deviceTag", ""))
+        medium = "wired" if tag.lower() == "wired" else "wireless"
+
+        raw_sig = dev.get("signal")
+        if medium == "wired" or raw_sig in (None, "", 0, "0", -110, "-110"):
+            signal = None
+        else:
+            signal = f"{raw_sig} dBm" if not str(raw_sig).endswith("dBm") else str(raw_sig)
+
+        enable_limit = dev.get("enableLimit") == "on"
+        try:
+            dl_limit = int(dev.get("downloadLimit", -1))
+        except (TypeError, ValueError):
+            dl_limit = -1
+        try:
+            ul_limit = int(dev.get("uploadLimit", -1))
+        except (TypeError, ValueError):
+            ul_limit = -1
+
+        try:
+            traffic = int(dev.get("trafficUsage", 0) or 0)
+        except (TypeError, ValueError):
+            traffic = 0
+
+        try:
+            online_time = int(dev.get("onlineTime", 0) or 0)
+        except (TypeError, ValueError):
+            online_time = 0
+
+        clients.append({
+            "hostname": dev.get("deviceName", ""),
+            "ipaddr": dev.get("ip", ""),
+            "macaddr": mac,
+            "medium": medium,
+            "band": tag,
+            "node": node,
+            "signal": signal,
+            "txrate_mbps": tx_mbps,
+            "rxrate_mbps": rx_mbps,
+            "down_speed_kbps": down_kbps,
+            "up_speed_kbps": up_kbps,
+            "traffic_bytes": traffic,
+            "online_time_seconds": online_time,
+            "speed_limit": {
+                "enabled": enable_limit,
+                "down_kbps": dl_limit,
+                "up_kbps": ul_limit,
+            },
+            "device_type": dev.get("deviceType", "other"),
+        })
+
+    # If raw_all was provided, append any online devices not in game_accelerator
+    if raw_all:
+        for host in raw_all.get("access_devices_wireless_host", []):
+            m = str(host.get("macaddr", "")).lower().replace("-", ":")
+            if m and m not in seen_macs:
+                seen_macs.add(m)
+                clients.append({
+                    "hostname": host.get("hostname", ""),
+                    "ipaddr": host.get("ipaddr", ""),
+                    "macaddr": host.get("macaddr", ""),
+                    "medium": "wireless",
+                    "band": host.get("wire_type", ""),
+                    "node": mac_to_node.get(m, root_name),
+                    "signal": None,
+                    "txrate_mbps": 0,
+                    "rxrate_mbps": 0,
+                    "down_speed_kbps": 0,
+                    "up_speed_kbps": 0,
+                    "traffic_bytes": 0,
+                    "online_time_seconds": 0,
+                    "speed_limit": {"enabled": False, "down_kbps": -1, "up_kbps": -1},
+                    "device_type": "other",
+                })
+        for host in raw_all.get("access_devices_wired", []):
+            m = str(host.get("macaddr", "")).lower().replace("-", ":")
+            if m and m not in seen_macs:
+                seen_macs.add(m)
+                clients.append({
+                    "hostname": host.get("hostname", ""),
+                    "ipaddr": host.get("ipaddr", ""),
+                    "macaddr": host.get("macaddr", ""),
+                    "medium": "wired",
+                    "band": "wired",
+                    "node": mac_to_node.get(m, root_name),
+                    "signal": None,
+                    "txrate_mbps": 0,
+                    "rxrate_mbps": 0,
+                    "down_speed_kbps": 0,
+                    "up_speed_kbps": 0,
+                    "traffic_bytes": 0,
+                    "online_time_seconds": 0,
+                    "speed_limit": {"enabled": False, "down_kbps": -1, "up_kbps": -1},
+                    "device_type": "other",
+                })
+
+    return clients
+
+
+def resolve_client_target(clients: list[dict[str, Any]], target: str) -> dict[str, Any] | None:
+    """Resolve a target client by MAC, IP, or hostname."""
+    t_clean = target.strip().lower()
+    t_mac = t_clean.replace("-", ":")
+
+    for c in clients:
+        c_mac = str(c.get("macaddr") or c.get("mac", "")).lower().replace("-", ":")
+        if c_mac == t_mac:
+            return c
+
+    for c in clients:
+        c_ip = str(c.get("ipaddr") or c.get("ip", "")).lower()
+        if c_ip == t_clean:
+            return c
+
+    for c in clients:
+        c_host = str(c.get("hostname") or c.get("name") or c.get("deviceName", "")).lower()
+        if c_host == t_clean:
+            return c
+
+    for c in clients:
+        c_host = str(c.get("hostname") or c.get("name") or c.get("deviceName", "")).lower()
+        c_mac = str(c.get("macaddr") or c.get("mac", "")).lower().replace("-", ":")
+        c_ip = str(c.get("ipaddr") or c.get("ip", "")).lower()
+        if t_clean in c_host or t_clean in c_mac or t_clean in c_ip:
+            return c
+
+    return None
+

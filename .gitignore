@@ -1,7 +1,7 @@
 # Environment and Secrets
 .env
 *.env
-!.env.example
+research/private_dumps/
 
 # Virtual Environment & Python
 .venv/

@@ -25,7 +25,7 @@ tpluci wifi list --json
 | `--url <URL>` | `ROUTER_URL` / `TPLUCI_URL` | `http://192.168.7.250` | Override the target router base URL for this invocation. |
 | `--timeout <FLOAT>` | `ROUTER_TIMEOUT` / `TPLUCI_TIMEOUT` | `5.0` | HTTP request timeout in seconds. |
 | `--no-cache` | — | `False` | Bypass the `/tmp` ephemeral session cache and force a fresh RSA+AES login handshake. |
-| `-v`, `--version` | — | — | Print `tpluci 0.1.0` and exit. |
+| `-v`, `--version` | — | — | Print `tpluci 0.2.0` and exit. |
 | `-h`, `--help` | — | — | Show command help and exit. |
 
 ### Stream Separation Contract
@@ -125,21 +125,30 @@ $ tpluci status --full --json
 
 ---
 
-### 2.2 `tpluci clients` — Connected Device Inventory & Search
+### 2.2 `tpluci clients` — Connected Device Inventory, Telemetry & Tether Controls
 
-Lists active wired and wireless clients from `status?form=all` (`access_devices_wireless_host` and `access_devices_wired`).
+`tpluci` provides full Tether-grade connected client management. Using an intelligent `ClientsGroup` parser, `tpluci clients` remains 100% backward-compatible with v0.1.0 (auto-routing queries to `list`) while enabling device renaming, bandwidth speed-limiting, and safety-guarded access control blocking.
 
 ```text
-Usage: tpluci clients [OPTIONS] [QUERY]
+Usage: tpluci clients [OPTIONS] [list|rename|limit|block|unblock] [ARGS]...
+```
+
+#### 2.2.1 `tpluci clients` / `tpluci clients list` — Device Inventory & Search
+
+```text
+Usage: tpluci clients list [OPTIONS] [QUERY]
 
 Options:
+  --detailed                                Include mesh node, throughput, signal, and traffic telemetry
+  --node TEXT                               Filter clients by mesh node name or MAC
   --wireless-only                           List only wireless clients
   --wired-only                              List only wired clients
   --band [2g|5g]                            Filter by Wi-Fi band
-  --sort [hostname|ip|band|mac|medium]      Sort output column (default: hostname)
+  --sort [hostname|ip|band|mac|medium|signal|traffic|node]
+                                            Sort output column (default: hostname)
 ```
 
-#### Default Client Table
+##### Default Client Table
 
 ```bash
 $ tpluci clients
@@ -153,46 +162,268 @@ Test-Phone   192.168.7.102  AA-BB-CC-DD-EE-02  wireless  2.4G
 Total: 4 clients (3 wireless, 1 wired)
 ```
 
-#### Substring Search Across Hostname, IP, or MAC
+##### Enriched Telemetry with Mesh Association (`--detailed`)
 
-Pass an optional positional `QUERY` to perform a case-insensitive substring match against `hostname`, `ipaddr`, or `macaddr`:
+Passing `--detailed` queries the hardware game accelerator (`smart_network?form=game_accelerator&operation=loadDevice`) and EasyMesh topology to resolve each client's parent node, live throughput, RSSI signal in dBm, and total cumulative traffic:
 
 ```bash
-$ tpluci clients laptop
-HOSTNAME     IP             MAC                MEDIUM    BAND
------------  -------------  -----------------  --------  ----
-Test-Laptop  192.168.7.101  AA-BB-CC-DD-EE-01  wireless  5G  
+$ tpluci clients --detailed
+HOSTNAME     IP             MAC                NODE              SIGNAL   DOWN SPEED  UP SPEED  TRAFFIC
+-----------  -------------  -----------------  ----------------  -------  ----------  --------  -------
+NAS-Server   192.168.7.10   AA-BB-CC-DD-EE-10  Archer AX23       wired    0 Kbps      0 Kbps    4.2 GB
+Smart-Plug   192.168.7.103  AA-BB-CC-DD-EE-03  Satellite-Hall    -67 dBm  12 Kbps     4 Kbps    120 MB
+Test-Laptop  192.168.7.101  AA-BB-CC-DD-EE-01  Archer AX23       -52 dBm  450 Kbps    85 Kbps   1.8 GB
+Test-Phone   192.168.7.102  AA-BB-CC-DD-EE-02  Satellite-Office  -61 dBm  85 Kbps     15 Kbps   950 MB
 
-Total: 1 clients (1 wireless, 0 wired)
+Total: 4 clients (3 wireless, 1 wired)
 ```
 
-#### Filtering by Band / Medium & Natural IPv4 Sorting
-
-`--sort ip` sorts IPv4 octets numerically (`192.168.7.10` before `192.168.7.101`) rather than lexicographically:
+##### Filter by Substring, Parent Node, or Band
 
 ```bash
-$ tpluci clients --wireless-only --band 2g --sort ip --json
-[
-  {
-    "hostname": "Test-Phone",
-    "ipaddr": "192.168.7.102",
-    "macaddr": "AA-BB-CC-DD-EE-02",
-    "medium": "wireless",
-    "band": "2.4G"
-  },
-  {
-    "hostname": "Smart-Plug",
-    "ipaddr": "192.168.7.103",
-    "macaddr": "AA-BB-CC-DD-EE-03",
-    "medium": "wireless",
-    "band": "2.4G"
+# Substring search across hostname, IP, MAC, or node
+tpluci clients laptop
+
+# Filter to clients associated with a specific satellite
+tpluci clients --node Satellite-Office --detailed
+
+# Natural IPv4 sorting in JSON mode
+tpluci clients --wireless-only --sort ip --json
+```
+
+#### 2.2.2 `tpluci clients rename` — Custom Device Aliases
+
+Assigns a custom display name (1–64 characters) to any connected device via `traffic?form=dev_name`:
+
+```bash
+# Target by IP, MAC, or current hostname
+$ tpluci clients rename 192.168.7.101 "Workstation-Pro" --dry-run
+[DRY-RUN] Simulated rename for Test-Laptop (AA-BB-CC-DD-EE-01):
+  name: Test-Laptop -> Workstation-Pro
+
+# Apply change to router
+$ tpluci clients rename 192.168.7.101 "Workstation-Pro"
+Renamed client AA-BB-CC-DD-EE-01 (Test-Laptop) to 'Workstation-Pro'.
+```
+
+#### 2.2.3 `tpluci clients limit` — Bandwidth Throttling
+
+Controls upload and download speed limits (1–1,024,000 Kbps) per client via `smart_network?form=client_speed_limit`:
+
+```bash
+# Throttle download to 5 Mbps (5000 Kbps)
+$ tpluci clients limit 192.168.7.103 --down 5000
+Speed limit applied to AA-BB-CC-DD-EE-03: download limit = 5000 Kbps, upload limit = unlimited.
+
+# Throttle both upload and download with --json output
+$ tpluci clients limit AA-BB-CC-DD-EE-03 --down 10000 --up 2000 --json
+{
+  "ok": true,
+  "dry_run": false,
+  "target": "AA-BB-CC-DD-EE-03",
+  "mac": "AA-BB-CC-DD-EE-03",
+  "speed_limit": {
+    "enabled": true,
+    "download_kbps": 10000,
+    "upload_kbps": 2000
   }
-]
+}
+
+# Remove speed limits
+$ tpluci clients limit 192.168.7.103 --disable
+Speed limit disabled for AA-BB-CC-DD-EE-03.
+```
+
+#### 2.2.4 `tpluci clients block` & `unblock` — Safety-Guarded Access Control
+
+Blocks or unblocks network access for devices using TP-Link's Access Control blacklist (`access_control?form=black_list`):
+
+- **Self-Lockout Protection (`HOST` Guard):** If `<TARGET>` resolves to the device making the API request (`host == "HOST"` in `access_control?form=black_devices` or matching `host_mac` in `access_control?form=enable`), `tpluci` **immediately aborts** with exit code `5` (`SafetyAbortError`), preventing accidental self-lockout from the router.
+- **Safety Confirmation:** `block` requires `--confirm` in non-interactive scripts; interactive shells will prompt for confirmation.
+
+```bash
+# Block an unauthorized device
+$ tpluci clients block AA-BB-CC-DD-EE-99 --confirm
+Client 'Unknown-Device' (AA-BB-CC-DD-EE-99) added to access control blacklist.
+
+# Attempting to block the managing host device triggers safety abort:
+$ tpluci clients block 192.168.7.101 --confirm
+Error: Refusing to block the current host device (HOST) to prevent router lockout.
+(Exit code 5)
+
+# Unblock a previously blacklisted device
+$ tpluci clients unblock AA-BB-CC-DD-EE-99
+Client 'AA-BB-CC-DD-EE-99' removed from access control blacklist.
 ```
 
 ---
 
-### 2.3 `tpluci wifi` — Main, Guest & IoT Wireless Control
+### 2.3 `tpluci mesh` — EasyMesh Topology & Satellite Extender Management
+
+`tpluci` provides comprehensive EasyMesh control. Operations are divided into:
+1. **Router-Managed Mesh APIs:** Communicating directly with the main Archer router to inspect topology, node telemetry, firmware status, and link/unlink satellites.
+2. **Direct Satellite Extender Protocols:** Communicating directly with range extenders (e.g. `RE705X` via HTTPS LuCI, `RE300` via TDDP) for satellite reboots, status LEDs, and reboot/power schedules.
+
+```text
+Usage: tpluci mesh [OPTIONS] COMMAND [ARGS]...
+
+Commands:
+  list             List all connected EasyMesh satellite nodes (alias: status)
+  topology         Display full hierarchical mesh tree topology
+  get              Inspect detailed metrics and backhaul speeds for a satellite
+  set              Rename or update location of a mesh satellite node
+  firmware         Inspect satellite firmware versions or trigger updates
+  remove           Unlink and remove a mesh satellite from the network
+  reboot           Reboot an individual mesh satellite extender (direct connection)
+  led              Inspect or configure status LED / Night Mode on a satellite
+  reboot-schedule  Inspect or configure reboot or power schedule on a satellite
+```
+
+#### 2.3.1 `tpluci mesh list` (alias: `tpluci mesh status`)
+
+Queries `easymesh_network?form=mesh_sclient_list_all` and displays satellite health, model, location, backhaul type (wired vs wireless), signal strength in dBm (`-254` normalized to `"N/A"` for wired connections), and connected client counts:
+
+```bash
+$ tpluci mesh list
+NAME              MODEL    IP            MAC                LOCATION  BACKHAUL  SIGNAL    CLIENTS  STATUS
+----------------  -------  ------------  -----------------  --------  --------  --------  -------  ------
+Satellite-Office  RE705X   192.168.7.2   AA-BB-CC-DD-EE-02  office    wireless  -58 dBm   2        online
+Satellite-Hall    RE300    192.168.7.3   AA-BB-CC-DD-EE-03  hallway   wireless  -64 dBm   1        online
+
+Total: 2 EasyMesh satellite(s)
+```
+
+#### 2.3.2 `tpluci mesh topology`
+
+Queries `easymesh_network?form=mesh_topology` to construct the entire EasyMesh tree:
+
+```bash
+$ tpluci mesh topology
+Root: Archer AX23 (Archer AX23) — IP: 192.168.7.250, MAC: AA-BB-CC-DD-EE-00
+  Connected Clients:
+    * NAS-Server (192.168.7.10, AA-BB-CC-DD-EE-10) [wire]
+    * Test-Laptop (192.168.7.101, AA-BB-CC-DD-EE-01) [5G] Signal: -52 dBm TX/RX: 866/866 Mbps
+
+Satellite: Satellite-Office (RE705X) — IP: 192.168.7.2, MAC: AA-BB-CC-DD-EE-02
+  Location: office | Backhaul: wireless | Signal: -58 dBm
+  Connected Clients:
+    * Work-Phone (192.168.7.105, AA-BB-CC-DD-EE-05) [5G] Signal: -61 dBm TX/RX: 650/650 Mbps
+    * Smart-Speaker (192.168.7.106, AA-BB-CC-DD-EE-06) [2.4G] Signal: -55 dBm TX/RX: 144/144 Mbps
+
+Satellite: Satellite-Hall (RE300) — IP: 192.168.7.3, MAC: AA-BB-CC-DD-EE-03
+  Location: hallway | Backhaul: wireless | Signal: -64 dBm
+  Connected Clients:
+    * Smart-Plug (192.168.7.103, AA-BB-CC-DD-EE-03) [2.4G] Signal: -67 dBm TX/RX: 72/72 Mbps
+```
+
+#### 2.3.3 `tpluci mesh get <NODE>`
+
+Resolves `<NODE>` by name, IP, or MAC and queries `easymesh_network?form=mesh_sclient_detail`. Backhaul speeds are automatically normalized from Kbps to Mbps:
+
+```bash
+$ tpluci mesh get Satellite-Office
+Node Name:            Satellite-Office
+Model:                RE705X
+IP Address:           192.168.7.2
+MAC Address:          AA-BB-CC-DD-EE-02
+Location:             office
+Firmware Version:     1.0.8 Build 20230510 Rel. 61124
+Parent Router MAC:    AA-BB-CC-DD-EE-00
+Backhaul Connection:  wireless
+Link Speed 2.4 GHz:   288 Mbps
+Link Speed 5 GHz:     650 Mbps
+Signal 2.4 GHz:       -54 dBm
+Signal 5 GHz:         -58 dBm
+Connected Clients:    2
+
+Connected Clients:
+CLIENT NAME    IP             MAC                MEDIUM  SIGNAL   TX/RX (Mbps)
+-------------  -------------  -----------------  ------  -------  ------------
+Work-Phone     192.168.7.105  AA-BB-CC-DD-EE-05  5G      -61 dBm  650/650     
+Smart-Speaker  192.168.7.106  AA-BB-CC-DD-EE-06  2.4G    -55 dBm  144/144     
+```
+
+#### 2.3.4 `tpluci mesh set <NODE>` — Node Renaming & Location Update
+
+Modifies a satellite's metadata using the verified minimal 3-parameter payload contract (`mac`, `name`, `location`):
+
+```bash
+$ tpluci mesh set Satellite-Office --name "Office-AP" --location "second_floor" --dry-run
+[DRY-RUN] Simulated changes for mesh satellite AA-BB-CC-DD-EE-02:
+  name: Satellite-Office -> Office-AP
+  location: office -> second_floor
+
+(Dry-run: No changes were applied to the router)
+```
+
+#### 2.3.5 `tpluci mesh firmware` & `tpluci mesh remove`
+
+```bash
+# Check satellite firmware versions and updates
+$ tpluci mesh firmware
+
+# Trigger satellite firmware upgrade (requires --confirm)
+$ tpluci mesh firmware --upgrade Satellite-Office --confirm
+
+# Unlink satellite from EasyMesh network (requires --confirm)
+$ tpluci mesh remove Satellite-Hall --confirm
+```
+
+#### 2.3.6 Direct Satellite Control (`reboot`, `led`, `reboot-schedule`)
+
+`tpluci` connects directly to satellite extenders using automatic protocol fingerprinting:
+- **Architecture 2 (`RE705X`)**: Communicates over HTTPS Classic LuCI with PKCS#1 v1.5 RSA encryption and handles TP-Link Cloud ID login with session conflict resolution.
+- **Architecture 3 (`RE300`)**: Communicates over HTTP using TDDP with mandatory `Referer` headers, XOR challenge authentication, and GDPR AES-128-CBC + SHA-256 payload signing.
+
+##### Direct Satellite Reboot
+
+```bash
+# Simulate reboot without issuing hardware command
+$ tpluci mesh reboot Satellite-Office --confirm --dry-run
+[DRY-RUN] Simulated reboot for satellite Office-AP (192.168.7.2).
+
+# Execute real satellite reboot
+$ tpluci mesh reboot Satellite-Office --confirm
+Reboot command sent to satellite 'Office-AP' (192.168.7.2).
+```
+
+##### Satellite Status LED & Night Mode
+
+```bash
+# Query current satellite LED status
+$ tpluci mesh led Satellite-Office
+Node:              Office-AP (192.168.7.2)
+Status LED:        ON
+Night Mode:        ON
+Night Mode Start:  23:00
+Night Mode End:    07:00
+
+# Configure satellite LED Night Mode with --dry-run
+$ tpluci mesh led Satellite-Office --night-mode on --start 22:30 --end 06:30 --dry-run
+[DRY-RUN] Updated LED settings for satellite 'Office-AP' (192.168.7.2):
+  time_start: 23:00 -> 22:30
+  time_end: 07:00 -> 06:30
+```
+
+##### Satellite Reboot / Power Schedule
+
+```bash
+# Query satellite reboot schedule
+$ tpluci mesh reboot-schedule Satellite-Hall
+Node:             Satellite-Hall (192.168.7.3)
+Schedule Type:    reboot_schedule
+Enabled:          ON
+Cycle:            week
+Day:              Sun
+Time:             03:30
+
+# Configure automated weekly satellite reboot
+$ tpluci mesh reboot-schedule Satellite-Hall --enable --cycle week --day Sun --time 03:30
+```
+
+---
+
+### 2.4 `tpluci wifi` — Main, Guest & IoT Wireless Control
 
 `tpluci` manages all **6 independent Wi-Fi radio forms** exposed by TP-Link Archer firmware:
 
@@ -310,7 +541,7 @@ $ tpluci wifi set guest-2g --enable --ssid "Visitors_2G" --json
 
 ---
 
-### 2.4 `tpluci wan` & `tpluci lan` — Network & DHCP Inspection
+### 2.5 `tpluci wan` & `tpluci lan` — Network & DHCP Inspection
 
 #### `tpluci wan`
 
@@ -375,7 +606,7 @@ $ tpluci lan --json
 
 ---
 
-### 2.5 `tpluci system` — Hardware Info, Clock & Safety-Guarded Reboot
+### 2.6 `tpluci system` — Hardware Info, Clock, Scheduled Reboot & LEDs
 
 #### `tpluci system info`
 
@@ -403,6 +634,78 @@ NTP Server 1:  time.nist.gov
 NTP Server 2:  time-nw.nist.gov
 ```
 
+#### `tpluci system reboot-schedule` — Scheduled Automated Reboots
+
+Inspects or configures the router's hardware reboot schedule via `reboot?form=set`:
+
+```text
+Usage: tpluci system reboot-schedule [OPTIONS]
+
+Options:
+  --enable / --disable    Enable or disable scheduled automatic reboot
+  --cycle [day|week|month]
+                          Reboot frequency cycle
+  --day TEXT              Day of week (Mon..Sun) or day of month (1..28)
+  --time TEXT             Scheduled reboot time in 24h format (HH:MM)
+  --dry-run               Simulate schedule changes without writing to router
+```
+
+> **Weekday Normalization:** TP-Link firmware expects `"Mon"`, `"Tues"`, `"Wed"`, `"Thur"`, `"Fri"`, `"Sat"`, `"Sun"`. `tpluci` automatically normalizes common human variations (`"Tuesday"`, `"tue"`, `"thursday"`, `"thu"`).
+
+```bash
+# Query active reboot schedule
+$ tpluci system reboot-schedule
+Scheduled Reboot:  Enabled
+Cycle:             week
+Day:               Tues
+Time:              04:00
+
+# Configure weekly Tuesday reboot at 04:00 AM with --dry-run
+$ tpluci system reboot-schedule --enable --cycle week --day tuesday --time 04:00 --dry-run
+[DRY-RUN] Simulated reboot schedule updates:
+  enable: off -> on
+  cycle: day -> week
+  day: Mon -> Tues
+  time: 03:00 -> 04:00
+
+(Dry-run: No changes were applied to the router)
+```
+
+#### `tpluci system led` — Status LEDs & Night Mode Schedule
+
+Inspects or configures the router's physical status LEDs (`ledgeneral?form=setting`) and LED Night Mode schedule (`ledpm?form=setting`):
+
+```text
+Usage: tpluci system led [OPTIONS]
+
+Options:
+  --on / --off            Turn router status LEDs on or off
+  --night-mode [on|off]   Enable or disable Night Mode schedule
+  --start TEXT            Night mode start time in 24h format (HH:MM)
+  --end TEXT              Night mode end time in 24h format (HH:MM)
+  --dry-run               Simulate LED changes without writing to router
+```
+
+```bash
+# Query status LEDs and Night Mode
+$ tpluci system led
+Status LED:        ON
+Night Mode:        ON
+Night Mode Start:  23:00
+Night Mode End:    07:00
+
+# Turn off LEDs immediately
+$ tpluci system led --off
+Updated LED settings. Status LEDs are now OFF.
+
+# Configure Night Mode schedule (turn off LEDs from 23:00 to 07:00)
+$ tpluci system led --night-mode on --start 23:00 --end 07:00
+Updated LED settings:
+  enable: on
+  time_start: 23:00
+  time_end: 07:00
+```
+
 #### `tpluci system reboot [--confirm] [--dry-run]`
 
 Reboots the router via `system?form=reboot` (`operation=reboot`).
@@ -421,46 +724,61 @@ Reboot command accepted. Router is now restarting.
 
 ---
 
-### 2.6 `tpluci call` — Endpoint Registry & Raw LuCI Escape Hatch
+### 2.7 `tpluci call` — Endpoint Registry & Raw LuCI Escape Hatch
 
-Provides direct access to all 30 verified LuCI endpoints and arbitrary `<module>?form=<form>` testing.
+Provides direct access to all 45 verified LuCI endpoints and arbitrary `<module>?form=<form>` testing.
 
-#### List All 30 Verified Endpoints (`tpluci call --list`)
+#### List All 45 Verified Endpoints (`tpluci call --list`)
 
 ```bash
 $ tpluci call --list
-CATEGORY  MODULE            FORM                    DESCRIPTION                                             
---------  ----------------  ----------------------  --------------------------------------------------------
-System    status            all                     Master endpoint returning 199 telemetry & status keys   
-System    status            internet                Quick WAN internet connection status                    
-System    status            menu_status             Menu patrol status flag                                 
-System    status            cloud_login_window_pop  Cloud binding status and popup counts                   
-System    system            sysmode                 Router operation mode (Router / Bridge)                 
-System    cloud_account     get_deviceInfo          Device model string (Archer AX23)                       
-System    cloud_account     check_upgrade           Cloud firmware upgrade notification                     
-System    firmware          upgrade                 Firmware version, hardware revision, build date         
-System    firmware          auto_upgrade            Auto firmware update settings                           
-System    time              settings                System clock, NTP servers, and timezone                 
-Network   network           wan_ipv4_status         WAN IPv4 connection status and protocol                 
-Network   network           wan_ipv6_status         WAN IPv6 status                                         
-Network   network           lan_ipv4                LAN IP address, subnet mask, and MAC address            
-Network   network           lan_agg                 Link Aggregation (LACP) status and port assignments     
-Network   dhcps             setting                 DHCP Server status, pool bounds, and lease time         
-Network   iptv              setting                 IPTV / VLAN port mappings and IGMP snooping             
-Network   ddns              provider                Dynamic DNS provider status                             
-Wireless  wireless          wireless_2g             Main 2.4 GHz Wi-Fi radio configuration                  
-Wireless  wireless          wireless_5g             Main 5 GHz Wi-Fi radio configuration                    
-Wireless  wireless          guest_2g                Guest 2.4 GHz Wi-Fi radio configuration                 
-Wireless  wireless          guest_5g                Guest 5 GHz Wi-Fi radio configuration                   
-Wireless  wireless          iot_2g                  IoT 2.4 GHz Wi-Fi radio configuration                   
-Wireless  wireless          iot_5g                  IoT 5 GHz Wi-Fi radio configuration                     
-Wireless  wireless          smart_connect           Smart Connect band-steering setting                     
-Wireless  easymesh_network  mesh_sclient_list_all   EasyMesh nodes and clients list                         
-Security  nat               dmz                     DMZ host status and IP                                  
-Security  nat               alg                     Application Layer Gateway (ALG) passthrough toggles     
-Security  access_control    enable                  Access Control engine toggle and host MAC               
-Security  access_control    mode                    Access Control mode (black / white list)                
-Security  qos               settings                Quality of Service bandwidth limits and prioritization  
+CATEGORY  MODULE            FORM                          DEFAULT OP      DESCRIPTION                                                    
+--------  ----------------  ----------------------------  --------------  ---------------------------------------------------------------
+System    status            all                           read            Master endpoint returning 199 telemetry & status keys          
+System    status            internet                      read            Quick WAN internet connection status                           
+System    status            menu_status                   read            Menu patrol status flag                                        
+System    status            cloud_login_window_pop        read            Cloud binding status and popup counts                          
+System    system            sysmode                       read            Router operation mode (Router / Bridge)                        
+System    cloud_account     get_deviceInfo                read            Device model string (Archer AX23)                              
+System    cloud_account     check_upgrade                 read            Cloud firmware upgrade notification                            
+System    firmware          upgrade                       read            Firmware version, hardware revision, build date                
+System    firmware          auto_upgrade                  read            Auto firmware update settings                                  
+System    firmware          slave_cmd                     slave_get_info  Mesh satellite firmware versions and update check              
+System    time              settings                      read            System clock, NTP servers, and timezone                        
+System    reboot            set                           read            Router scheduled reboot configuration                          
+System    ledgeneral        setting                       read            Master router LED status and switch                            
+System    ledpm             setting                       read            Router LED Night Mode schedule settings                        
+Network   network           wan_ipv4_status               read            WAN IPv4 connection status and protocol                        
+Network   network           wan_ipv6_status               read            WAN IPv6 status                                                
+Network   network           lan_ipv4                      read            LAN IP address, subnet mask, and MAC address                   
+Network   network           lan_agg                       read            Link Aggregation (LACP) status and port assignments            
+Network   dhcps             setting                       read            DHCP Server status, pool bounds, and lease time                
+Network   iptv              setting                       read            IPTV / VLAN port mappings and IGMP snooping                    
+Network   ddns              provider                      read            Dynamic DNS provider status                                    
+Wireless  wireless          wireless_2g                   read            Main 2.4 GHz Wi-Fi radio configuration                         
+Wireless  wireless          wireless_5g                   read            Main 5 GHz Wi-Fi radio configuration                           
+Wireless  wireless          guest_2g                      read            Guest 2.4 GHz Wi-Fi radio configuration                        
+Wireless  wireless          guest_5g                      read            Guest 5 GHz Wi-Fi radio configuration                          
+Wireless  wireless          iot_2g                        read            IoT 2.4 GHz Wi-Fi radio configuration                          
+Wireless  wireless          iot_5g                        read            IoT 5 GHz Wi-Fi radio configuration                            
+Wireless  wireless          smart_connect                 read            Smart Connect band-steering setting                            
+Wireless  easymesh_network  mesh_sclient_list_all         read            EasyMesh nodes and clients list                                
+Wireless  easymesh_network  mesh_topology                 read            Full EasyMesh tree topology and per-node client lists          
+Wireless  easymesh_network  mesh_sclient_detail           read            Single EasyMesh node detail, backhaul speeds, and clients      
+Wireless  easymesh_network  available_mesh_device_manage  link            Link or unlink EasyMesh candidate satellites                   
+Wireless  easymesh_network  available_mesh_device_list    read            List nearby unconfigured EasyMesh candidate devices            
+Wireless  easymesh          easymesh_enable               read            Master EasyMesh toggle and configuration                       
+Wireless  easymesh          search_slave                  write           Trigger background search for new EasyMesh slave devices       
+Network   smart_network     game_accelerator              loadDevice      Rich client telemetry, real-time speeds, and traffic usage     
+Network   traffic           dev_name                      write           Set custom display name (alias) for connected client           
+Network   smart_network     client_speed_limit            read_max        Client download/upload bandwidth throttle limits               
+Security  nat               dmz                           read            DMZ host status and IP                                         
+Security  nat               alg                           read            Application Layer Gateway (ALG) passthrough toggles            
+Security  access_control    enable                        read            Access Control engine toggle and host MAC                      
+Security  access_control    mode                          read            Access Control mode (black / white list)                       
+Security  access_control    black_devices                 load            Online devices list with host identification for access control
+Security  access_control    black_list                    load            Access control blacklist rules table                           
+Security  qos               settings                      read            Quality of Service bandwidth limits and prioritization         
 ```
 
 #### Execute Raw Read/Write Calls
@@ -486,6 +804,27 @@ $ tpluci call --module easymesh_network --form mesh_sclient_list_all
 
 # Write parameters to an endpoint
 $ tpluci call nat dmz --op write --param enable=off --param ipaddr=192.168.7.50
+```
+
+---
+
+### 2.8 `tpluci config` & `tpluci logout` — Credentials & Session Management
+
+```bash
+# Launch interactive profile wizard (TTY only)
+$ tpluci config
+
+# Add a named profile with secure OS keyring storage
+$ tpluci config add --name home --url http://192.168.7.250 --password "MySecret"
+
+# List configured profiles (passwords masked)
+$ tpluci config list
+
+# Test authentication with target router
+$ tpluci config test --profile home
+
+# Clear local /tmp session cache
+$ tpluci logout
 ```
 
 ---
@@ -538,16 +877,21 @@ If you have already saved your credentials via `tpluci config`, no plaintext pas
 }
 ```
 
-### 3.2 Exposed MCP Tools Reference (7 Tools)
+### 3.2 Exposed MCP Tools Reference (12 Tools)
 
-All 7 MCP tools catch `TpluciError` exceptions and return structured JSON dictionaries (`{"ok": false, "error_code": "...", "message": "...", "hint": "..."}`) so LLM agents can self-correct without crashing the MCP server.
+All 12 MCP tools catch `TpluciError` exceptions and return structured JSON dictionaries (`{"ok": false, "error_code": "...", "message": "...", "hint": "..."}`) so LLM agents can self-correct without crashing the MCP server.
 
 | Tool Name | Parameters & Defaults | Return Payload & Behavior |
 | :--- | :--- | :--- |
 | **`router_get_status`** | `full: bool = False`<br/>`field: str \| None = None` | By default returns the ~120-token curated status summary (`model`, `cpu_usage`, `mem_usage`, `uptime_seconds`, `internet_status`, `wan_ip`, `lan_ip`, `wifi`, `clients_count`). If `field` is provided, returns `{field: value}`. If `full=True`, returns all 199 raw keys from `status?form=all`. |
-| **`router_list_clients`** | `query: str \| None = None`<br/>`medium: str = "all"` | Returns a list of connected client dictionaries (`hostname`, `ipaddr`, `macaddr`, `medium`, `band`). Filters by case-insensitive substring `query` (hostname, IP, or MAC) and `medium` (`"all"`, `"wireless"`, `"wired"`). |
+| **`router_list_clients`** | `query: str \| None = None`<br/>`medium: str = "all"`<br/>`node: str \| None = None`<br/>`detailed: bool = False` | Returns a list of connected client dictionaries (`hostname`, `ipaddr`, `macaddr`, `medium`, `band`, and if `detailed=True`: `node`, `signal_dbm`, `down_speed_kbps`, `up_speed_kbps`, `traffic_bytes`). Supports substring filtering by query or parent mesh node. |
 | **`router_get_wifi`** | `radio: str = "all"` | When `radio="all"`, returns the 6-element summary list across `2g`, `5g`, `guest-2g`, `guest-5g`, `iot-2g`, and `iot-5g`. When a specific radio is passed, calls `wireless?form=<form>` (`operation=read`) and returns full radio parameters. |
 | **`router_set_wifi`** | `radio: str`<br/>`enable: bool \| None = None`<br/>`ssid: str \| None = None`<br/>`password: str \| None = None`<br/>`hidden: bool \| None = None`<br/>`dry_run: bool = False` | Performs a safe Read-Modify-Write on the target radio (`2g`, `5g`, `guest-2g`, `guest-5g`, `iot-2g`, `iot-5g`). Validates WPA password length (8–63 chars), strips read-only nested metadata, and returns a mutation receipt (`dry_run`, `changed`, `diff`, `state`). |
 | **`router_get_network_info`** | *(none)* | Queries `network?form=wan_ipv4_status`, `status?form=all`, `network?form=lan_ipv4`, and `dhcps?form=setting`, returning `{"wan": {...}, "lan": {...}}`. |
+| **`router_manage_client`** | `target: str`<br/>`alias: str \| None = None`<br/>`download_limit_kbps: int \| None = None`<br/>`upload_limit_kbps: int \| None = None`<br/>`disable_limit: bool = False`<br/>`dry_run: bool = False` | Renames a client or configures download/upload speed limits (1–1,024,000 Kbps) using `traffic?form=dev_name` and `smart_network?form=client_speed_limit`. |
+| **`router_get_mesh`** | `node: str \| None = None`<br/>`include_firmware: bool = False` | Returns complete EasyMesh topology tree, list of satellites, and connected clients. If `node` is provided, returns detailed node telemetry and backhaul link speeds. |
+| **`router_set_mesh_node`** | `node: str`<br/>`name: str \| None = None`<br/>`location: str \| None = None`<br/>`dry_run: bool = False` | Renames an EasyMesh satellite or updates its location using `easymesh_network?form=mesh_sclient_detail` with a minimal 3-parameter payload. |
+| **`router_reboot_mesh_node`** | `node: str`<br/>`confirm: bool = False`<br/>`dry_run: bool = False` | Reboots a specific satellite extender directly via device adapter (HTTPS LuCI or TDDP). **Safety Guard**: Strictly requires `confirm=True`. |
+| **`router_system_settings`** | `reboot_schedule_enable: bool \| None = None`<br/>`reboot_cycle: str \| None = None`<br/>`reboot_day: str \| None = None`<br/>`reboot_time: str \| None = None`<br/>`led_enable: bool \| None = None`<br/>`night_mode_enable: bool \| None = None`<br/>`night_start: str \| None = None`<br/>`night_end: str \| None = None`<br/>`dry_run: bool = False` | Reads or updates router scheduled reboot and LED / Night Mode configuration. |
 | **`router_reboot`** | `confirm: bool = False` | Reboots the physical router hardware. **Safety Guard**: Returns `error_code="SAFETY_ABORT"` unless `confirm=True` is explicitly passed by the caller. |
 | **`router_raw_call`** | `module: str`<br/>`form: str`<br/>`operation: str = "read"`<br/>`params: dict \| None = None` | Executes any signed, AES-encrypted LuCI CGI request to `/cgi-bin/luci/;stok=<TOKEN>/admin/<module>?form=<form>` and returns the decrypted JSON dictionary. |

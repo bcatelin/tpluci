@@ -100,13 +100,21 @@ def rsa_encrypt_chunk(chunk: str | bytes, nn_hex: str, ee_hex: str = "010001") -
     return f"{c:0{hex_len}x}"
 
 
-def rsa_encrypt(plaintext: str, nn_hex: str, ee_hex: str = "010001") -> str:
-    """Encrypt plaintext string using 53-byte chunking and RSA PKCS#1 v1.5.
+def rsa_encrypt_pkcs1_v15(
+    plaintext: str,
+    n_hex: str,
+    e_hex: str = "010001",
+    chunk_size: int = 53,
+) -> str:
+    """Encrypt plaintext string using PKCS#1 v1.5 padding and optional chunking.
 
-    Splits UTF-8 encoded plaintext into 53-byte slices matching TP-Link tpEncrypt.js
-    while preventing multi-byte UTF-8 characters from overflowing 512-bit RSA blocks.
+    Matches TP-Link's pkcs1pad2 implementation in js/all.js and tpEncrypt.min.js.
+    When chunk_size > 0, splits UTF-8 encoded plaintext into slices of chunk_size bytes
+    to prevent multi-byte characters from overflowing RSA moduli.
     """
-    chunk_size = 53
+    if chunk_size is None or chunk_size <= 0:
+        return rsa_encrypt_chunk(plaintext, n_hex, e_hex)
+
     data_bytes = plaintext.encode("utf-8")
     chunks = [data_bytes[i : i + chunk_size] for i in range(0, len(data_bytes), chunk_size)]
     if not chunks:
@@ -114,9 +122,53 @@ def rsa_encrypt(plaintext: str, nn_hex: str, ee_hex: str = "010001") -> str:
 
     result = []
     for chunk in chunks:
-        result.append(rsa_encrypt_chunk(chunk, nn_hex, ee_hex))
+        result.append(rsa_encrypt_chunk(chunk, n_hex, e_hex))
 
     return "".join(result)
+
+
+def rsa_encrypt(plaintext: str, nn_hex: str, ee_hex: str = "010001") -> str:
+    """Encrypt plaintext string using 53-byte chunking and RSA PKCS#1 v1.5.
+
+    Splits UTF-8 encoded plaintext into 53-byte slices matching TP-Link tpEncrypt.js.
+    """
+    return rsa_encrypt_pkcs1_v15(plaintext, nn_hex, ee_hex, chunk_size=53)
+
+
+def sha256_hash(text: str) -> str:
+    """Compute lowercase 64-character SHA-256 hex digest of UTF-8 text."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest().lower()
+
+
+DEFAULT_KEY = "RDpbLfCPsJZ7fiv"  # gitleaks:allow
+DEFAULT_DICT = (
+    "yLwVl0zKqws7LgKPRQ84Mdt708T1qQ3Ha7xv3H7NyU84p21BriUWBU43odz3iP4r"
+    "BL3cD02KZciXTysVXiV8ngg6vL48rPJyAUw0HurW20xqxv9aYb4M9wK1Ae0wlro5"
+    "10qXeU07kV57fQMc8L6aLgMLwygtc0F10a0Dg70TOoouyFhdysuRMO51yY5ZlOZZ"
+    "LEal1h0t9YQW0Ko7oBwmCAHoic4HYbUyVeU3sfQ1xtXcPcf1aT303wAQhv66qzW"
+)
+
+
+def tp_xor_encrypt(
+    a: str,
+    b: str = DEFAULT_KEY,
+    dic: str = DEFAULT_DICT,
+) -> str:
+    """TP-Link XOR-scrambling function matching $.su.encrypt in su.fun.js.
+
+    Performs character-by-character XOR with fallback byte 0xBB (187)
+    and maps the output to characters in `dic`.
+    """
+    len1 = len(a)
+    len2 = len(b)
+    len_dict = len(dic)
+    length = max(len1, len2)
+    output = []
+    for i in range(length):
+        cl = ord(a[i]) if i < len1 else 0xBB
+        cr = ord(b[i]) if i < len2 else 0xBB
+        output.append(dic[(cl ^ cr) % len_dict])
+    return "".join(output)
 
 
 def build_signature(

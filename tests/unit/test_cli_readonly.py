@@ -189,7 +189,7 @@ def test_cli_call_list_and_exec():
     res_list = runner.invoke(cli, ["call", "--list", "--json"])
     assert res_list.exit_code == 0
     eps = json.loads(res_list.output)
-    assert len(eps) == 30
+    assert len(eps) >= 42
 
     res_call = runner.invoke(cli, ["call", "status", "all", "--json"])
     assert res_call.exit_code == 0

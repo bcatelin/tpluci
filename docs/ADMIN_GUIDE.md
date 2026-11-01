@@ -123,6 +123,34 @@ TPLUCI_PROFILE=lab tpluci wifi list
 tpluci config delete --name lab
 ```
 
+### Satellite Extender Credential Resolution & TP-Link Cloud ID Binding
+
+When using direct satellite management commands (`tpluci mesh reboot`, `tpluci mesh led`, `tpluci mesh reboot-schedule`), `tpluci` resolves satellite credentials through a 3-tier resolution cascade implemented in `resolve_satellite_credentials()`:
+
+```mermaid
+flowchart TD
+    A["Satellite Credential Request (node_name, node_ip)"] --> B{"Tier 1: Explicit Flags or Env Vars?<br/>(--satellite-user/pwd, TPLUCI_SATELLITE_*)"}
+    B -- Yes --> C["Use Explicit Satellite Credentials"]
+    B -- No --> D{"Tier 2: Named Profile in config.json or Keyring?<br/>(matches node_name.lower() or node_ip)"}
+    D -- Yes --> E["Load Satellite Profile Credentials"]
+    D -- No --> F["Tier 3: Fallback to Active Router Profile Credentials"]
+```
+
+1. **Tier 1 (Explicit Invocations):** Pass `--satellite-user <USER>` and `--satellite-password <PWD>` on the CLI, or export `TPLUCI_SATELLITE_USER` and `TPLUCI_SATELLITE_PASSWORD` in your environment.
+2. **Tier 2 (Named Satellite Profiles):** Create a named profile in `tpluci config` matching the satellite's name (case-insensitive, e.g. `re705x` or `satellite-office`) or its IP address (e.g. `192.168.7.2`):
+   ```bash
+   tpluci config add --name re705x --url https://192.168.7.2 --username admin@example.com --password "SatelliteCloudPass"
+   ```
+3. **Tier 3 (Router Credential Fallback):** If no satellite-specific credentials exist, `tpluci` transparently falls back to the active primary router's credentials.
+
+#### Important Notes on TP-Link Cloud ID Binding (Tether App)
+
+When mesh extenders (such as `RE705X` or `RE300`) are adopted or onboarded through the TP-Link Tether mobile application, the extender firmware binds to your **TP-Link Cloud ID (email)**:
+- On **Architecture 2 (`RE705X`)**: The extender pre-flight check reports `cloud_ever_login: true`. Standard local password authentication is rejected, requiring authentication against `/cgi-bin/luci/;stok=/login?form=cloud_login` with your TP-Link Cloud ID email and password.
+- On **Architecture 3 (`RE300`)**: The extender TDDP block `68` (`CLOUD_CURRENT_USER_CFG_DATA_ID`) reports `isBinded: 1`. Local XOR challenge authentication is rejected, requiring cloud authentication.
+
+If login fails and cloud binding is detected, `tpluci` raises an `AuthError` containing an exact, copy-paste remediation command showing how to provide satellite credentials or save a dedicated profile.
+
 ---
 
 ## 3. Session Lifecycle & Router Concurrency
@@ -171,8 +199,8 @@ Local session cache cleared for profile 'default'.
 
 ### Non-Interactive TTY Guards
 
-Destructive operations (`tpluci system reboot`) check `sys.stdin.isatty()`:
-- In an **interactive terminal**, `tpluci system reboot` prompts `Are you sure you want to reboot the router? [y/N]`.
+Destructive operations (`tpluci system reboot`, `tpluci mesh reboot`, `tpluci mesh remove`, `tpluci mesh firmware --upgrade`, and `tpluci clients block`) check `sys.stdin.isatty()`:
+- In an **interactive terminal**, `tpluci` prompts the operator for explicit confirmation unless `--confirm` is passed.
 - In a **non-interactive environment** (cron jobs, systemd services, Home Assistant `shell_command`, or AI agent subprocesses), omitting `--confirm` never hangs waiting for input—it immediately exits with code `5` (`SAFETY_ABORT`).
 
 ```bash
@@ -182,6 +210,25 @@ $ tpluci system reboot --json < /dev/null
   "error_code": "SAFETY_ABORT",
   "message": "Refusing to reboot router in non-interactive environment without --confirm.",
   "hint": "Pass --confirm to authorize router reboot: tpluci system reboot --confirm"
+}
+```
+
+### Host Device Self-Lockout Protection (`HOST` Guard)
+
+Accidentally blocking the management workstation or server that runs `tpluci` would sever network connectivity and lock the operator out of the router.
+
+To eliminate this operational hazard:
+1. `tpluci clients block <TARGET>` queries `access_control?form=black_devices` (`operation="load"`) and `access_control?form=enable`.
+2. The router's LuCI backend explicitly tags the current calling device with `host: "HOST"` and exposes `host_mac`.
+3. If `<TARGET>` matches the IP, MAC, or hostname of this managing host device, `tpluci` **refuses execution** and immediately raises `SafetyAbortError` (exit code `5`), even if `--confirm` was passed:
+
+```bash
+$ tpluci clients block 192.168.7.101 --confirm --json
+{
+  "ok": false,
+  "error_code": "SAFETY_ABORT",
+  "message": "Refusing to block the current host device (HOST) to prevent router lockout.",
+  "hint": "Specify a different client IP, MAC, or hostname to block."
 }
 ```
 

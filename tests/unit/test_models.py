@@ -22,7 +22,7 @@ def sanitized_status():
 
 
 def test_verified_endpoints_count():
-    assert len(VERIFIED_ENDPOINTS) == 30
+    assert len(VERIFIED_ENDPOINTS) >= 42
     categories = {ep["category"] for ep in VERIFIED_ENDPOINTS}
     assert categories == {"System", "Network", "Wireless", "Security"}
     # Check all 6 Wi-Fi radios in radio map

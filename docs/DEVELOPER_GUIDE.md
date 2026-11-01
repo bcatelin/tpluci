@@ -12,19 +12,20 @@ This guide documents the internal architecture of `tpluci`, TP-Link's encrypted 
 flowchart TD
     subgraph Entrypoints["Entrypoints"]
         CLI["cli.py (Click OrderIndependentGroup)"]
-        MCP["mcp_server.py (FastMCP Server)"]
+        MCP["mcp_server.py (FastMCP Server - 12 Tools)"]
         LIB["External Python Code (import tpluci)"]
     end
 
     subgraph Core["Core Library (src/tpluci/)"]
         CLIENT["client.py (RouterClient)"]
-        CONFIG["config.py (4-Tier Credentials)"]
+        CONFIG["config.py (4-Tier & Satellite Credentials)"]
         SESSION["session.py (0600 /tmp SessionCache)"]
-        CRYPTO["crypto.py (53-Byte RSA + AES-128-CBC)"]
-        MODELS["models.py (Response Normalizers)"]
-        ENDPOINTS["endpoints.py (30 Verified Endpoints)"]
+        CRYPTO["crypto.py (RSA Chunking, PKCS#1 v1.5, AES-128-CBC & XOR)"]
+        MODELS["models.py (Response Normalizers & Resolvers)"]
+        ENDPOINTS["endpoints.py (45 Verified Endpoints)"]
         FMT["formatters.py (Tables, KV, JSON & Errors)"]
         EXC["exceptions.py (TpluciError & Exit Codes 0-5)"]
+        SATELLITES["satellites.py (HTTPS LuCI & TDDP Adapters)"]
     end
 
     CLI --> FMT
@@ -32,32 +33,39 @@ flowchart TD
     CLI --> ENDPOINTS
     CLI --> CONFIG
     CLI --> CLIENT
+    CLI --> SATELLITES
 
     MCP --> MODELS
     MCP --> ENDPOINTS
     MCP --> CLIENT
+    MCP --> SATELLITES
 
     LIB --> CLIENT
+    LIB --> SATELLITES
     CLIENT --> CONFIG
     CLIENT --> SESSION
     CLIENT --> CRYPTO
     CLIENT --> EXC
+    SATELLITES --> CRYPTO
+    SATELLITES --> CONFIG
+    SATELLITES --> EXC
 ```
 
 ### Module Breakdown (`src/tpluci/`)
 
 | Module | Responsibility |
 | :--- | :--- |
-| [`cli.py`](../src/tpluci/cli.py) | Pure `click` CLI entrypoint (`tpluci`). Implements `OrderIndependentGroup` so global flags (`--json`, `--plain`, `--profile`, `--url`, `--timeout`, `--no-cache`) are parsed at any position without stripping subcommand options. |
+| [`cli.py`](../src/tpluci/cli.py) | Pure `click` CLI entrypoint (`tpluci`). Implements `OrderIndependentGroup`, `ClientsGroup`, and `MeshGroup` for position-agnostic global flags and backward-compatible command routing without stripping options. |
 | [`client.py`](../src/tpluci/client.py) | `RouterClient`: manages `httpx.Client`, 50ms rate limiting, 3-step RSA+AES login handshake, transparent session auto-recovery, `call()`, and safe `read_modify_write()`. |
-| [`crypto.py`](../src/tpluci/crypto.py) | Pure-Python cryptographic primitives matching TP-Link's `tpEncrypt.js` and `encrypt.js`: `md5_hash()`, `generate_aes_key_iv()`, `aes_encrypt()`, `aes_decrypt()`, `rsa_encrypt_chunk()`, `rsa_encrypt()`, and `build_signature()`. |
-| [`config.py`](../src/tpluci/config.py) | 4-tier credential resolver (`env` -> `.env` -> `keyring` -> `0600 ~/.config/tpluci/config.json`) and profile CRUD helpers. |
+| [`crypto.py`](../src/tpluci/crypto.py) | Pure-Python cryptographic primitives: MD5/SHA-256 hashing, 16-digit AES key/IV generation, AES-128-CBC round-trips, pure-Python RFC 2313 PKCS#1 v1.5 random type-2 chunked RSA encryption, and `tp_xor_encrypt()` salt dictionary cipher. |
+| [`config.py`](../src/tpluci/config.py) | 4-tier router credential resolver, 3-tier satellite credential hierarchy (`resolve_satellite_credentials()`), and profile CRUD helpers. |
 | [`session.py`](../src/tpluci/session.py) | `SessionData` and `SessionCache`: atomic `0600` (`O_NOFOLLOW`) read/write of session tokens and encryption keys in `$TMPDIR/tpluci-session-<uid>-<profile>.json` with a 180-second TTL. |
-| [`models.py`](../src/tpluci/models.py) | Data normalizers (`parse_status_summary`, `parse_clients`, `parse_wifi_summary`, `parse_wan_info`, `parse_lan_info`), including `[0.0, 1.0]` float-to-percentage conversion and natural IPv4 sorting. |
-| [`endpoints.py`](../src/tpluci/endpoints.py) | `WIFI_RADIO_MAP` (mapping `2g`, `5g`, `guest-2g`, `guest-5g`, `iot-2g`, `iot-5g` to LuCI forms) and `VERIFIED_ENDPOINTS` (catalog of 30 verified Archer AX23 endpoints). |
+| [`models.py`](../src/tpluci/models.py) | Data normalizers (`parse_status_summary`, `parse_clients`, `parse_clients_detailed`, `parse_mesh_satellites`, `parse_mesh_topology`, `parse_mesh_satellite_detail`, `normalize_weekday`), float-to-percentage conversion, Kbps-to-Mbps rates, and target resolvers (`resolve_client_target`, `resolve_mesh_node`). |
+| [`endpoints.py`](../src/tpluci/endpoints.py) | `WIFI_RADIO_MAP` (mapping 6 Wi-Fi radios to LuCI forms) and `VERIFIED_ENDPOINTS` (catalog of 45 verified Archer AX23 operations with default verbs). |
+| [`satellites.py`](../src/tpluci/satellites.py) | Direct satellite protocol adapters: `HttpsLuciSatelliteClient` (Architecture 2, e.g. RE705X), `TddpSatelliteClient` (Architecture 3, e.g. RE300), and `connect_satellite()` auto-detection factory. |
 | [`formatters.py`](../src/tpluci/formatters.py) | Zero-dependency space-padded table formatter (`format_table`), aligned key-value formatter (`format_key_value`), and `stdout`/`stderr` stream emitters (`emit_output`, `emit_error`). |
 | [`exceptions.py`](../src/tpluci/exceptions.py) | Structured exception hierarchy (`TpluciError`, `AuthError`, `NetworkError`, `LuciApiError`, `SafetyAbortError`) with `.to_dict()` JSON error envelopes and semantic exit codes (`0`–`5`). |
-| [`mcp_server.py`](../src/tpluci/mcp_server.py) | `tpluci-mcp` binary entrypoint exposing 7 tools via `mcp.server.fastmcp.FastMCP`. |
+| [`mcp_server.py`](../src/tpluci/mcp_server.py) | `tpluci-mcp` binary entrypoint exposing 12 tools via `mcp.server.fastmcp.FastMCP`. |
 
 ### Maintaining the <50ms Startup Budget
 
@@ -65,6 +73,7 @@ To keep `tpluci --help` and cached CLI invocations under 50ms:
 1. **No `rich` or `typer`**: Formatting in `formatters.py` uses pure Python string alignment (`ljust`), avoiding `rich`'s ~80ms import cost.
 2. **Lazy Imports on Heavy Paths**:
    - `RouterClient` (`httpx` + `cryptography`) is imported inside `get_client()` only when a command actually needs network communication (`tpluci --help`, `tpluci call --list`, and `tpluci config list` never import `httpx`).
+   - `satellites.py` and direct extender adapters are imported lazily inside `_resolve_and_connect_satellite()` only when executing `mesh reboot`, `mesh led`, or `mesh reboot-schedule`.
    - `keyring` and `dotenv` are imported lazily inside `config.py` only when Tier 2 or Tier 3 credential resolution is reached.
    - `mcp` (`FastMCP`) is isolated inside `mcp_server.py` and never imported by `cli.py`.
 
@@ -182,7 +191,9 @@ with RouterClient() as client:
 
 ### Step 1: Discover and Verify an Endpoint with `tpluci call`
 
-Use `tpluci call` to probe candidate `<module>` and `<form>` names on your router:
+Consult the [Endpoint Discovery & Reverse-Engineering Guide](ENDPOINT_DISCOVERY_GUIDE.md) to inspect your router's static frontend JavaScript (`/webpages/config/models.json` and `modules.json`), extract active form names, and identify required `operation` verbs (such as `operation=loadDevice` or `operation=slave_get_info`).
+
+Then probe candidate `<module>` and `<form>` names directly:
 
 ```bash
 # Test reading the QoS settings endpoint
@@ -202,6 +213,7 @@ VERIFIED_ENDPOINTS: list[dict[str, str]] = [
     {
         "module": "qos",
         "form": "settings",
+        "operation": "read",
         "category": "Security",
         "description": "Quality of Service bandwidth limits and prioritization",
     },
@@ -216,16 +228,18 @@ When adding a first-class CLI command or MCP tool, write a pure normalization fu
 > - **Boolean Strings**: TP-Link forms represent booleans inconsistently across endpoints (`"on"`/`"off"`, `"On"`/`"Off"`, or `true`/`false`). Normalize with `str(val).lower() == "on"`.
 > - **CPU/RAM Ratios**: On physical Archer AX23 firmware, `cpu1_usage` and `mem_usage` in `status?form=all` are returned as floats in `[0.0, 1.0]` (e.g. `0.11` for `11%`), whereas some firmware revisions return integers `0`–`100`. Use `_normalize_percentage()` in `models.py`.
 > - **Split WAN Telemetry**: `network?form=wan_ipv4_status` only returns `{"autodetect": "off", "conntype": "pppoe"}` on Archer AX23; the actual WAN IP, DNS servers (`wan_ipv4_pridns`, `wan_ipv4_snddns`), gateway, and WAN MAC (`wan_macaddr`) live inside `status?form=all`. `parse_wan_info(raw_wan, raw_all)` merges both sources.
+> - **Backhaul & Link Speeds**: Hardware backhaul link speeds (`link_speed_24g`, `link_speed_5g`) and client throughput rates (`txrate`, `rxrate`) are often reported in Kbps (e.g., `866000` or `665600`). Convert to Mbps via `int(speed) // 1024` or `round(rate / 1000)`.
+> - **Wired Signal Sentinels**: On Ethernet-connected mesh satellites or wired clients, signal strength fields often report sentinels like `-254`, `-110`, or `0`. Normalize these to `"N/A"` or `None`.
 
 ---
 
 ## 5. Testing & Open-Source Release Workflow
 
-`tpluci` maintains 77 automated tests split into fast offline unit tests (`tests/unit/`) and live hardware integration tests (`tests/integration/`).
+`tpluci` maintains 113 automated unit tests split into fast offline unit tests (`tests/unit/`) and live hardware integration tests (`tests/integration/`).
 
 ### Running Offline Unit Tests (`tests/unit/`)
 
-Offline unit tests use `respx` to mock the router's HTTP endpoints with real RSA/AES encryption round-trips and sanitized fixtures ([`tests/fixtures/sanitized_status_all.json`](../tests/fixtures/sanitized_status_all.json)). They run in ~0.4 seconds without network access:
+Offline unit tests use `respx` to mock the router's and satellites' HTTP endpoints with real RSA/AES encryption round-trips and sanitized fixtures ([`tests/fixtures/sanitized_status_all.json`](../tests/fixtures/sanitized_status_all.json)). They run in ~0.6 seconds without network access:
 
 ```bash
 uv run pytest tests/unit -v
@@ -233,25 +247,27 @@ uv run pytest tests/unit -v
 
 | Unit Test Suite | Coverage Area |
 | :--- | :--- |
-| [`tests/unit/test_crypto.py`](../tests/unit/test_crypto.py) | MD5 hashing, 16-digit AES key/IV generation, AES-128-CBC round-trips, 512-bit & 1024-bit RSA 53-byte UTF-8 chunking, and login/request signature formatting. |
-| [`tests/unit/test_config.py`](../tests/unit/test_config.py) | All 4 credential tiers, `TPLUCI_PROFILE` resolution, atomic `0600` file permissions, and profile CRUD operations. |
+| [`tests/unit/test_crypto.py`](../tests/unit/test_crypto.py) | MD5 hashing, 16-digit AES key/IV generation, AES-128-CBC round-trips, 512-bit & 1024-bit RSA 53-byte UTF-8 chunking, pure-Python PKCS#1 v1.5 padding (`pkcs1pad2`), SHA-256, `tp_xor_encrypt()` salt dictionary cipher, and signature formatting. |
+| [`tests/unit/test_config.py`](../tests/unit/test_config.py) | All 4 credential tiers, `TPLUCI_PROFILE` resolution, 3-tier satellite credential resolution (`resolve_satellite_credentials`), atomic `0600` file permissions, and profile CRUD operations. |
 | [`tests/unit/test_session_and_client.py`](../tests/unit/test_session_and_client.py) | Ephemeral `0600` session cache TTL/URL/password-hash binding, 3-step login handshake, encrypted `call()`, automatic re-login on HTTP `403`/timeout, and `read_modify_write()` nested-object stripping. |
 | [`tests/unit/test_models.py`](../tests/unit/test_models.py) | Status dashboard normalization (including float CPU/RAM ratios), client filtering/natural IP sorting, Wi-Fi 6-radio summary, and combined WAN/LAN parsers. |
+| [`tests/unit/test_mesh_and_tether.py`](../tests/unit/test_mesh_and_tether.py) | EasyMesh topology and satellite detail normalization (Kbps->Mbps, wired sentinels), client speed limiting and renaming, Tuesday/Thursday weekday normalization, `HOST` self-lockout prevention, and mesh/client MCP tools. |
+| [`tests/unit/test_satellites.py`](../tests/unit/test_satellites.py) | Direct satellite protocol adapters: `HttpsLuciSatelliteClient` (PKCS#1 v1.5 RSA, `cloud_ever_login`), `TddpSatelliteClient` (GDPR `code=16`, XOR auth, TDDP blocks `112`/`113`/`114`), auto-detection, safety guards, and MCP satellite reboot tool. |
 | [`tests/unit/test_exceptions.py`](../tests/unit/test_exceptions.py) | `TpluciError`, `AuthError`, `NetworkError`, `LuciApiError`, and `SafetyAbortError` envelopes and exit codes (`0`–`5`). |
 | [`tests/unit/test_cli_base.py`](../tests/unit/test_cli_base.py) | Position-agnostic global flags (`OrderIndependentGroup`), `config` subcommands, and `logout`. |
 | [`tests/unit/test_cli_readonly.py`](../tests/unit/test_cli_readonly.py) | Read-only CLI commands (`status`, `clients`, `wifi list`, `wifi get`, `wan`, `lan`, `system info/time`, `call --list`). |
 | [`tests/unit/test_cli_mutations.py`](../tests/unit/test_cli_mutations.py) | Mutating CLI commands (`wifi set` with `--dry-run`, `system reboot` TTY safety guards, and `call` write operations). |
-| [`tests/unit/test_mcp_server.py`](../tests/unit/test_mcp_server.py) | All 7 FastMCP tools (`router_get_status`, `router_list_clients`, `router_get_wifi`, `router_set_wifi`, `router_get_network_info`, `router_reboot`, `router_raw_call`) and `TpluciError` JSON envelopes. |
+| [`tests/unit/test_mcp_server.py`](../tests/unit/test_mcp_server.py) | FastMCP tools catalog (`router_get_status`, `router_list_clients`, `router_get_wifi`, `router_set_wifi`, `router_get_network_info`, `router_manage_client`, `router_get_mesh`, `router_set_mesh_node`, `router_system_settings`, `router_reboot`, `router_raw_call`, `router_reboot_mesh_node`) and `TpluciError` JSON envelopes. |
 
 ### Running Live Router Integration Tests (`tests/integration/`)
 
-When a `.env` file is present in the repository root and the physical router is reachable, `tests/integration/test_live_router.py` runs 5 non-destructive live verification tests (`status`, `wifi list`, `clients`, `wifi set guest-2g --enable --dry-run`, and `wan`):
+When a `.env` file is present in the repository root and the physical router is reachable, `tests/integration/test_live_router.py` runs non-destructive live verification tests (`status`, `wifi list`, `clients`, `wifi set guest-2g --enable --dry-run`, and `wan`):
 
 ```bash
 # Run only live router integration tests
 uv run pytest tests/integration -v
 
-# Run the entire 77-test suite (unit + live integration)
+# Run the entire test suite (unit + live integration)
 uv run pytest -v
 ```
 

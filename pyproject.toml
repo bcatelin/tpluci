@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tpluci"
-version = "0.1.0"
+version = "0.2.0"
 description = "Pure Python CLI and MCP server for TP-Link Archer LuCI routers"
 readme = "README.md"
 requires-python = ">=3.10"

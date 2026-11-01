@@ -289,3 +289,61 @@ def resolve_credentials(
             f"tpluci config add --name {target_profile} --url {DEFAULT_ROUTER_URL}"
         ),
     )
+
+
+def resolve_satellite_credentials(
+    node_name: str,
+    node_ip: str,
+    base_creds: ResolvedCredentials,
+    cli_user: str | None = None,
+    cli_password: str | None = None,
+) -> tuple[str, str]:
+    """Resolve credentials for a direct mesh satellite extender across 3 tiers.
+
+    Tier 1: Explicit CLI flags (--satellite-user / --satellite-password) or
+            environment variables (TPLUCI_SATELLITE_USER / TPLUCI_SATELLITE_PASSWORD).
+    Tier 2: Named profile in config.json / OS keyring matching node_name.lower()
+            (e.g. 're705x', 're300') or node_ip.
+    Tier 3: Fallback to the active main router profile's resolved username and password.
+    """
+    # -------------------------------------------------------------
+    # Tier 1: CLI Flags or Environment Variables
+    # -------------------------------------------------------------
+    env_user = os.environ.get("TPLUCI_SATELLITE_USER") or os.environ.get("ROUTER_SATELLITE_USER")
+    env_pwd = os.environ.get("TPLUCI_SATELLITE_PASSWORD") or os.environ.get("ROUTER_SATELLITE_PASSWORD")
+    user = cli_user or env_user
+    pwd = cli_password or env_pwd
+    if pwd:
+        return user or "", pwd
+
+    # -------------------------------------------------------------
+    # Tier 2: Named profile in config.json / Keyring
+    # -------------------------------------------------------------
+    candidates: list[str] = []
+    if node_name:
+        candidates.append(node_name.lower().strip())
+    if node_ip and node_ip.strip() not in candidates:
+        candidates.append(node_ip.strip())
+
+    cfg = load_config()
+    profiles = cfg.get("profiles", {})
+    for cand in candidates:
+        if cand in profiles:
+            prof_data = profiles[cand]
+            cand_user = prof_data.get("username", "")
+            cand_pwd: str | None = None
+            if prof_data.get("use_keyring", True):
+                try:
+                    import keyring
+                    cand_pwd = keyring.get_password("tpluci", cand)
+                except Exception:
+                    cand_pwd = None
+            if not cand_pwd:
+                cand_pwd = prof_data.get("password")
+            if cand_pwd:
+                return cand_user, cand_pwd
+
+    # -------------------------------------------------------------
+    # Tier 3: Fallback to Active Router Credentials
+    # -------------------------------------------------------------
+    return base_creds.username, base_creds.password
